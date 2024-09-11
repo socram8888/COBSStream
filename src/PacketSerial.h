@@ -227,7 +227,7 @@ public:
 
                     // clear the index here so that the callback function can call update() if needed and receive more data
                     _receiveBufferIndex = 0;
-                    _recieveBufferOverflow = false;
+                    _receiveBufferOverflow = false;
 
                     if (_onPacketFunction)
                     {
@@ -240,7 +240,7 @@ public:
 
                 } else {
                     _receiveBufferIndex = 0;
-                    _recieveBufferOverflow = false;
+                    _receiveBufferOverflow = false;
                 }
             }
             else
@@ -253,7 +253,7 @@ public:
                 {
                     // The buffer will be in an overflowed state if we write
                     // so set a buffer overflowed flag.
-                    _recieveBufferOverflow = true;
+                    _receiveBufferOverflow = true;
                 }
             }
         }
@@ -404,14 +404,14 @@ public:
     /// \returns true if the receive buffer overflowed.
     bool overflow() const
     {
-        return _recieveBufferOverflow;
+        return _receiveBufferOverflow;
     }
 
 private:
     PacketSerial_(const PacketSerial_&);
     PacketSerial_& operator = (const PacketSerial_&);
 
-    bool _recieveBufferOverflow = false;
+    bool _receiveBufferOverflow = false;
 
     uint8_t _receiveBuffer[ReceiveBufferSize];
     size_t _receiveBufferIndex = 0;
