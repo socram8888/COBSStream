@@ -4,14 +4,9 @@
 // SPDX-License-Identifier: MIT
 //
 
-
 #pragma once
 
-
 #include <Arduino.h>
-#include "Encoding/COBS.h"
-#include "Encoding/SLIP.h"
-
 
 /// \brief A template class enabling packet-based Serial communication.
 ///
@@ -21,11 +16,9 @@
 /// The template parameters allow the user to define their own packet encoder /
 /// decoder, custom packet marker and receive buffer size.
 ///
-/// \tparam EncoderType The static packet encoder class name.
-/// \tparam PacketMarker The byte value used to mark the packet boundary.
 /// \tparam BufferSize The number of bytes allocated for the receive buffer.
-template<typename EncoderType, uint8_t PacketMarker = 0, size_t ReceiveBufferSize = 256>
-class PacketSerial_
+template<size_t ReceiveBufferSize = 256>
+class COBSStream
 {
 public:
     /// \brief A typedef describing the packet handler method.
@@ -44,25 +37,10 @@ public:
     ///
     ///     void onPacketReceived(void* sender, const uint8_t* buffer, size_t size);
     ///
-    /// where sender is a pointer to the PacketSerial_ instance that recieved
+    /// where sender is a pointer to the COBSStream instance that recieved
     /// the buffer,  buffer is a pointer to the incoming buffer array, and size
     /// is the number of bytes in the incoming buffer.
     typedef void (*PacketHandlerFunctionWithSender)(const void* sender, const uint8_t* buffer, size_t size);
-
-    /// \brief Construct a default PacketSerial_ device.
-    PacketSerial_():
-        _receiveBufferIndex(0),
-        _stream(nullptr),
-        _onPacketFunction(nullptr),
-        _onPacketFunctionWithSender(nullptr),
-        _senderPtr(nullptr)
-    {
-    }
-
-    /// \brief Destroy the PacketSerial_ device.
-    ~PacketSerial_()
-    {
-    }
 
     /// \brief Begin a default serial connection with the given speed.
     ///
@@ -173,9 +151,9 @@ public:
     }
 
     /// \brief Get a pointer to the current stream.
-    /// \warning Reading from or writing to the stream managed by PacketSerial_
+    /// \warning Reading from or writing to the stream managed by COBSStream
     ///          may break the packet-serial protocol if not done so with care. 
-    ///          Access to the stream is allowed because PacketSerial_ never
+    ///          Access to the stream is allowed because COBSStream never
     ///          takes ownership of the stream and thus does not have exclusive
     ///          access to the stream anyway.
     /// \returns a non-const pointer to the stream, or nullptr if unset.
@@ -185,9 +163,9 @@ public:
     }
 
     /// \brief Get a pointer to the current stream.
-    /// \warning Reading from or writing to the stream managed by PacketSerial_
+    /// \warning Reading from or writing to the stream managed by COBSStream
     ///          may break the packet-serial protocol if not done so with care. 
-    ///          Access to the stream is allowed because PacketSerial_ never
+    ///          Access to the stream is allowed because COBSStream never
     ///          takes ownership of the stream and thus does not have exclusive
     ///          access to the stream anyway.
     /// \returns a const pointer to the stream, or nullptr if unset.
@@ -211,50 +189,73 @@ public:
     {
         if (_stream == nullptr) return;
 
-        while (_stream->available() > 0)
+        while (true)
         {
-            uint8_t data = _stream->read();
-
-            if (data == PacketMarker)
+            int data = _stream->read();
+            if (data < 0)
             {
-                if (_onPacketFunction || _onPacketFunctionWithSender)
-                {
-                    uint8_t _decodeBuffer[_receiveBufferIndex];
-
-                    size_t numDecoded = EncoderType::decode(_receiveBuffer,
-                                                            _receiveBufferIndex,
-                                                            _decodeBuffer);
-
-                    // clear the index here so that the callback function can call update() if needed and receive more data
-                    _receiveBufferIndex = 0;
-                    _receiveBufferOverflow = false;
-
-                    if (_onPacketFunction)
-                    {
-                        _onPacketFunction(_decodeBuffer, numDecoded);
-                    }
-                    else if (_onPacketFunctionWithSender)
-                    {
-                        _onPacketFunctionWithSender(_senderPtr, _decodeBuffer, numDecoded);
-                    }
-
-                } else {
-                    _receiveBufferIndex = 0;
-                    _receiveBufferOverflow = false;
-                }
+                return;
             }
+
+            /*
+             * If we have received a zero byte, that means we reached the end of a packet.
+             * Call packet handling functions.
+             */
+            if (data == 0)
+            {
+				size_t cappedSize = min(_receiveBufferIndex, ReceiveBufferSize);
+                if (_onPacketFunction)
+                {
+                    _onPacketFunction(_receiveBuffer, cappedSize);
+                }
+                else if (_onPacketFunctionWithSender)
+                {
+                    _onPacketFunctionWithSender(_senderPtr, _receiveBuffer, cappedSize);
+                }
+
+                _receiveBufferIndex = 0;
+                _firstReceivedByte = true;
+            }
+
+            /*
+             * Current byte must be overhead if:
+             *   - It is the first byte (_overheadByte < 0)
+             *   - The overhead was 0xFF, and the counter reached that value.
+             */
+            else if (_firstReceivedByte || _zeroCounter == 0xFF)
+            {
+                _overheadByte = data;
+                _zeroCounter = 1;
+                _firstReceivedByte = false;
+            }
+
+            /*
+             * If the zero counter matches the overhead byte, append the zero and save the current
+             * byte as the new overhead.
+             */
+            else if (_zeroCounter == _overheadByte)
+            {
+                if (_receiveBufferIndex < ReceiveBufferSize)
+                {
+                    _receiveBuffer[_receiveBufferIndex] = 0;
+                }
+                _receiveBufferIndex++;
+
+                _overheadByte = data;
+                _zeroCounter = 1;
+            }
+
+            /*
+             * Else this must be a regular data byte. Append to buffer.
+             */
             else
             {
-                if ((_receiveBufferIndex + 1) < ReceiveBufferSize)
+                if (_receiveBufferIndex < ReceiveBufferSize)
                 {
-                    _receiveBuffer[_receiveBufferIndex++] = data;
+                    _receiveBuffer[_receiveBufferIndex] = data;
                 }
-                else
-                {
-                    // The buffer will be in an overflowed state if we write
-                    // so set a buffer overflowed flag.
-                    _receiveBufferOverflow = true;
-                }
+                _receiveBufferIndex++;
+                _zeroCounter++;
             }
         }
     }
@@ -275,6 +276,8 @@ public:
     /// \param size The number of bytes in the data buffer.
     void send(const uint8_t* buffer, size_t size) const
     {
+        return;
+#if 0
         if(_stream == nullptr || buffer == nullptr || size == 0) return;
 
         uint8_t _encodeBuffer[EncoderType::getEncodedBufferSize(size)];
@@ -285,6 +288,7 @@ public:
 
         _stream->write(_encodeBuffer, numEncoded);
         _stream->write(PacketMarker);
+#endif
     }
 
     /// \brief Set the function that will receive decoded packets.
@@ -404,17 +408,15 @@ public:
     /// \returns true if the receive buffer overflowed.
     bool overflow() const
     {
-        return _receiveBufferOverflow;
+        return _receiveBufferIndex > ReceiveBufferSize;
     }
 
 private:
-    PacketSerial_(const PacketSerial_&);
-    PacketSerial_& operator = (const PacketSerial_&);
-
-    bool _receiveBufferOverflow = false;
-
     uint8_t _receiveBuffer[ReceiveBufferSize];
     size_t _receiveBufferIndex = 0;
+    bool _firstReceivedByte = true;
+    uint_least8_t _overheadByte;
+    uint_least8_t _zeroCounter;
 
     Stream* _stream = nullptr;
 
@@ -422,13 +424,3 @@ private:
     PacketHandlerFunctionWithSender _onPacketFunctionWithSender = nullptr;
     void* _senderPtr = nullptr;
 };
-
-
-/// \brief A typedef for the default COBS PacketSerial class.
-typedef PacketSerial_<COBS> PacketSerial;
-
-/// \brief A typedef for a PacketSerial type with COBS encoding.
-typedef PacketSerial_<COBS> COBSPacketSerial;
-
-/// \brief A typedef for a PacketSerial type with SLIP encoding.
-typedef PacketSerial_<SLIP, SLIP::END> SLIPPacketSerial;
